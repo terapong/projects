@@ -1,0 +1,204 @@
+# Micro-ROS with Raspberry Pi Pico, VSCode, and DHT Sensor in C++
+
+This guide will help you set up a Micro-ROS environment on Raspberry Pi Pico using VS Code to read data from a DHT sensor (DHT11/DHT22) in C++.
+
+## Prerequisites
+
+- Raspberry Pi Pico
+- DHT11 or DHT22 sensor
+- VS Code installed
+- Basic wiring tools (breadboard, jumper wires)
+
+## Setup Steps
+
+### 1. Install Required Tools
+
+1. **Install VS Code** with C++ extensions
+2. **Install Pico SDK** following the [official guide](https://datasheets.raspberrypi.com/pico/getting-started-with-pico.pdf)
+3. **Install Micro-ROS for Pico**:
+   ```bash
+   git clone https://github.com/micro-ROS/micro_ros_raspberrypi_pico_sdk.git
+   ```
+
+### 2. Create a New Project in VS Code
+
+1. Create a new folder for your project
+2. Set up the CMake configuration to include both Pico SDK and Micro-ROS
+
+### 3. Wiring the DHT Sensor
+
+Connect the DHT sensor to your Pico:
+- VCC to 3.3V (Pin 36)
+- Data to a GPIO pin (e.g., GP16)
+- GND to Ground (Pin 38)
+
+### 4. DHT Library Integration
+
+Add a DHT library to your project. A popular choice is the SimpleDHT library adapted for Pico.
+
+```cpp
+// Example DHT implementation for Pico
+#include "pico/stdlib.h"
+#include "hardware/gpio.h"
+
+class DHT22 {
+private:
+    uint pin;
+    
+public:
+    DHT22(uint pin) : pin(pin) {
+        gpio_init(pin);
+    }
+    
+    bool read(float &temperature, float &humidity) {
+        // Implementation of DHT reading protocol
+        // ...
+        return true;
+    }
+};
+```
+
+### 5. Micro-ROS Node with DHT Publisher
+
+```cpp
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <sensor_msgs/msg/temperature.h>
+#include <sensor_msgs/msg/humidity.h>
+
+#include "DHT22.h"
+
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){return false;}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
+
+rcl_publisher_t temperature_publisher;
+rcl_publisher_t humidity_publisher;
+sensor_msgs__msg__Temperature temperature_msg;
+sensor_msgs__msg__Humidity humidity_msg;
+
+DHT22 dht_sensor(16);  // GP16
+
+bool create_entities() {
+    RCCHECK(rclc_publisher_init_default(
+        &temperature_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Temperature),
+        "pico/temperature"));
+    
+    RCCHECK(rclc_publisher_init_default(
+        &humidity_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Humidity),
+        "pico/humidity"));
+    
+    return true;
+}
+
+void publish_sensor_data() {
+    float temperature, humidity;
+    if(dht_sensor.read(temperature, humidity)) {
+        temperature_msg.temperature = temperature;
+        humidity_msg.relative_humidity = humidity;
+        
+        RCSOFTCHECK(rcl_publish(&temperature_publisher, &temperature_msg, NULL));
+        RCSOFTCHECK(rcl_publish(&humidity_publisher, &humidity_msg, NULL));
+    }
+}
+
+int main() {
+    stdio_init_all();
+    
+    // Micro-ROS setup
+    rcl_allocator_t allocator = rcl_get_default_allocator();
+    rclc_support_t support;
+    rclc_executor_t executor;
+    
+    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+    RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+    
+    rcl_node_t node;
+    RCCHECK(rclc_node_init_default(&node, "pico_dht_node", "", &support));
+    
+    if(!create_entities()) {
+        return 1;
+    }
+    
+    while(true) {
+        publish_sensor_data();
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        sleep_ms(2000);  // Read every 2 seconds
+    }
+    
+    // Cleanup
+    RCCHECK(rcl_publisher_fini(&temperature_publisher, &node));
+    RCCHECK(rcl_publisher_fini(&humidity_publisher, &node));
+    RCCHECK(rcl_node_fini(&node));
+    
+    return 0;
+}
+```
+
+### 6. CMake Configuration
+
+Ensure your CMakeLists.txt includes both Micro-ROS and your DHT library:
+
+```cmake
+cmake_minimum_required(VERSION 3.13)
+
+include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+include(micro_ros_raspberrypi_pico_sdk/micro_ros_raspberrypi_pico_sdk.cmake)
+
+project(pico_dht_micro_ros C CXX ASM)
+
+pico_sdk_init()
+
+add_executable(pico_dht_micro_ros
+    src/main.cpp
+    src/DHT22.cpp
+)
+
+target_include_directories(pico_dht_micro_ros PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+pico_enable_stdio_usb(pico_dht_micro_ros 1)
+pico_enable_stdio_uart(pico_dht_micro_ros 0)
+
+target_link_libraries(pico_dht_micro_ros
+    pico_stdlib
+    micro_ros_raspberrypi_pico_sdk
+)
+
+pico_add_extra_outputs(pico_dht_micro_ros)
+```
+
+### 7. Build and Flash
+
+1. Build your project in VS Code
+2. Flash the UF2 file to your Pico
+
+### 8. ROS 2 Setup on Host Machine
+
+On your host machine (assuming Ubuntu with ROS 2):
+
+```bash
+source /opt/ros/$ROS_DISTRO/setup.bash
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
+```
+
+Now you should be able to see the temperature and humidity topics:
+
+```bash
+ros2 topic echo /pico/temperature
+ros2 topic echo /pico/humidity
+```
+
+## Troubleshooting
+
+1. If the agent can't connect, check the serial port and baud rate
+2. Ensure proper power supply to the DHT sensor
+3. Verify all GPIO connections
+4. Check for library compatibility issues between Micro-ROS and Pico SDK versions
+
+This setup provides a foundation for integrating environmental sensors with Micro-ROS on Raspberry Pi Pico using VS Code for development.

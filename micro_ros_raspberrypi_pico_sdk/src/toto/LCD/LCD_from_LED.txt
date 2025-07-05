@@ -1,0 +1,144 @@
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <rcl/error_handling.h>
+#include "pico/stdlib.h"
+#include "../pico_uart_transports.h"
+#include <rmw_microros/rmw_microros.h>
+
+#include "hardware/i2c.h"
+// #include <LiquidCrystal_I2C.h>
+// #include "microros_transports.h"
+
+rcl_node_t node;
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_publisher_t publisher;
+rcl_subscription_t subscriber;
+
+rcl_timer_t timer;
+
+#include <std_msgs/msg/string.h>
+std_msgs__msg__String msg;
+
+// LCD I2C address (typically 0x27 or 0x3F)
+#define LCD_ADDR 0x27
+///LiquidCrystal_I2C lcd(0x27, 16, 2);  // Address 0x27, 16 columns, 2 rows
+
+// // Initialize I2C
+void i2c_init_lcd() {
+    i2c_init(i2c_default, 100 * 1000);
+    gpio_set_function(PICO_DEFAULT_I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(PICO_DEFAULT_I2C_SDA_PIN);
+    gpio_pull_up(PICO_DEFAULT_I2C_SCL_PIN);
+}
+
+// // Send command to LCD
+void lcd_send_cmd(uint8_t cmd) {
+    uint8_t data[2] = {0x80, cmd};
+    i2c_write_blocking(i2c_default, LCD_ADDR, data, 2, false);
+}
+
+// // Send data to LCD
+void lcd_send_data(uint8_t data) {
+    uint8_t data_u[2] = {0x40, data};
+    i2c_write_blocking(i2c_default, LCD_ADDR, data_u, 2, false);
+}
+
+// // Initialize LCD
+void lcd_init() {
+    sleep_ms(50);
+    lcd_send_cmd(0x38); // Function set
+    sleep_ms(5);
+    lcd_send_cmd(0x0C); // Display ON, Cursor OFF
+    sleep_ms(5);
+    lcd_send_cmd(0x01); // Clear display
+    sleep_ms(5);
+    lcd_send_cmd(0x06); // Entry mode set
+}
+
+// // Print string to LCD
+void lcd_print(const char *str) {
+    while (*str) {
+        lcd_send_data(*str++);
+    }
+}
+
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
+    (void)last_call_time;
+    if (timer != NULL) {
+        rcl_publish(&publisher, &msg, NULL);
+    }
+}
+
+int main() {
+    rmw_uros_set_custom_transport(
+		true,
+		NULL,
+		pico_serial_transport_open,
+		pico_serial_transport_close,
+		pico_serial_transport_write,
+		pico_serial_transport_read
+	);
+
+    // Initialize LCD
+    i2c_init_lcd();
+    lcd_init();
+    lcd_print("Micro-ROS Ready");
+
+    // Set up Micro-ROS
+    allocator = rcl_get_default_allocator();
+
+    // Wait for agent successful ping for 2 minutes.
+    const int timeout_ms = 1000; 
+    const uint8_t attempts = 120;
+
+    rcl_ret_t ret = rmw_uros_ping_agent(timeout_ms, attempts);
+    if (ret != RCL_RET_OK) {
+        // Unreachable agent, exiting program.
+        return ret;
+    }
+
+    rclc_support_init(&support, 0, NULL, &allocator);
+    rclc_node_init_default(&node, "otto_node", "", &support);
+  
+    // Create publisher
+    rclc_publisher_init_default(
+        &publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+        "pico_lcd_output");
+    
+    // Create timer
+    rclc_timer_init_default(
+        &timer,
+        &support,
+        RCL_MS_TO_NS(1000),
+        timer_callback);
+
+    // Create executor
+    rclc_executor_init(&executor, &support.context, 1, &allocator);
+    rclc_executor_add_timer(&executor, &timer);
+
+    msg.data.data = (char*)allocator.allocate(50, allocator.state);
+    msg.data.capacity = 50;
+
+    while (true) {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        // Update LCD with message data if needed
+    }
+
+    // Cleanup
+    rcl_publisher_fini(&publisher, &node);
+    rcl_node_fini(&node);
+    return 0;
+}
+
+//ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
+//ros2 topic list
+//ros2 topic echo /pico_lcd_output
+//ros2 topic pub --once /led_command std_msgs/Bool "data: true"
+//ros2 topic pub --once /led_command std_msgs/Bool "data: false"
+//ros2 run otto_robot led_control_gui

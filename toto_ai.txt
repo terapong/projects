@@ -1,0 +1,184 @@
+micro_ros dht rasberry pi pico
+
+# Using micro-ROS with DHT Sensor on Raspberry Pi Pico
+
+This guide will help you set up a micro-ROS node on a Raspberry Pi Pico to read data from a DHT sensor (DHT11 or DHT22) and publish it to a ROS 2 network.
+
+## Prerequisites
+
+Raspberry Pi Pico (or Pico W)
+DHT11 or DHT22 temperature/humidity sensor
+USB cable
+ROS 2 installation (Humble or newer recommended)
+micro-ROS build system setup
+
+
+## Hardware Connections
+
+Connect the DHT sensor to your Pico:
+
+DHT Sensor   | Raspberry Pi Pico
+------------------------------
+VCC/Red      | 3.3V (Pin 36)
+Data/Yellow  | GPIO Pin (e.g., GP15, Pin 20)
+GND/Black    | GND (Pin 38)
+
+Add a 4.7K-10KΩ pull-up resistor between the data line and 3.3V.
+
+## Software Setup
+
+### 1. Install Required Libraries
+
+First, install the DHT library for Pico:
+
+git clone https://github.com/raspberrypi/pico-sdk.git
+git clone https://github.com/adafruit/DHT-sensor-library.git
+
+### 2. Create micro-ROS Project
+
+Set up your micro-ROS environment following the official documentation, then create a new project.
+
+### 3. Example Code
+
+Here's a complete example to read from DHT and publish to micro-ROS:
+
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "DHT.h"
+
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <sensor_msgs/msg/temperature.h>
+#include <sensor_msgs/msg/relative_humidity.h>
+
+#define DHT_PIN 15
+#define DHT_TYPE DHT22
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+rcl_publisher_t temperature_publisher;
+rcl_publisher_t humidity_publisher;
+sensor_msgs__msg__Temperature temperature_msg;
+sensor_msgs__msg__RelativeHumidity humidity_msg;
+
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
+    (void)last_call_time;
+    if (timer != NULL) {
+        // Read sensor data
+        float temp = dht.readTemperature();
+        float hum = dht.readHumidity();
+        
+        if (!isnan(temp) && !isnan(hum)) {
+            // Prepare and publish temperature message
+            temperature_msg.temperature = temp;
+            temperature_msg.variance = 0.0f;
+            rcl_publish(&temperature_publisher, &temperature_msg, NULL);
+            
+            // Prepare and publish humidity message
+            humidity_msg.relative_humidity = hum;
+            humidity_msg.variance = 0.0f;
+            rcl_publish(&humidity_publisher, &humidity_msg, NULL);
+        }
+    }
+}
+
+void micro_ros_init() {
+    allocator = rcl_get_default_allocator();
+    
+    // Initialize support
+    rclc_support_init(&support, 0, NULL, &allocator);
+    
+    // Create node
+    rclc_node_init_default(&node, "pico_dht_node", "", &support);
+    
+    // Create publishers
+    rclc_publisher_init_default(
+        &temperature_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Temperature),
+        "/pico/temperature");
+    
+    rclc_publisher_init_default(
+        &humidity_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, RelativeHumidity),
+        "/pico/humidity");
+    
+    // Create timer
+    rcl_timer_t timer;
+    const unsigned int timer_timeout = 1000; // ms
+    rclc_timer_init_default(&timer, &support, RCL_MS_TO_NS(timer_timeout), timer_callback);
+    
+    // Create executor
+    rclc_executor_init(&executor, &support.context, 1, &allocator);
+    rclc_executor_add_timer(&executor, &timer);
+}
+
+int main() {
+    stdio_init_all();
+    dht.begin();
+    
+    micro_ros_init();
+    
+    while(1) {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        sleep_ms(10);
+    }
+    
+    return 0;
+}
+
+### 4. Build and Flash
+
+Build your project using the micro-ROS build system and flash it to your Pico.
+
+## ROS 2 Setup
+
+On your ROS 2 machine:
+
+Ensure the micro-ROS agent is running:
+
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
+
+View the published data:
+
+ros2 topic echo /pico/temperature
+ros2 topic echo /pico/humidity
+
+## Troubleshooting
+
+If you get no data:
+
+   - Check your wiring connections
+   - Verify the correct GPIO pin is used
+   - Ensure the pull-up resistor is properly connected
+
+For micro-ROS connection issues:
+
+   - Check the correct serial port is used
+   - Verify both ends are using the same transport (serial/USB)
+
+For DHT reading errors:
+
+   - Add error checking for NaN values
+   - Implement retry logic for failed readings
+
+## Advanced Options
+
+Add QoS configuration for the publishers
+Implement a custom message type combining both temperature and humidity
+Add WiFi support if using Pico W
+Implement parameter server for configuration
+
+
+Would you like me to elaborate on any specific part of this setup?
+Tue 5:42 PM
+You sent
+Sent 11h ago

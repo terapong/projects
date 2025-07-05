@@ -1,0 +1,195 @@
+# Micro-ROS with Raspberry Pi Pico: Buzzer Control in C++ using VS Code
+
+This guide will help you set up a Micro-ROS project on Raspberry Pi Pico to control a buzzer using C++ in VS Code.
+
+## Prerequisites
+
+- Raspberry Pi Pico
+- Micro-USB cable
+- Passive buzzer (or active buzzer with transistor if needed)
+- VS Code installed
+- Basic understanding of C++ and ROS 2
+
+## Setup Steps
+
+### 1. Install Required Tools
+
+```bash
+# Install VS Code extensions:
+- C/C++
+- CMake Tools
+- ROS
+- Pico-W-Go (for Pico debugging)
+
+# Install dependencies
+sudo apt install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential
+```
+
+### 2. Create Micro-ROS Workspace
+
+Follow the Micro-ROS Raspberry Pi Pico setup instructions from the [Micro-ROS documentation](https://micro.ros.org/docs/tutorials/core/first_application_rtos/freertos/).
+
+### 3. Hardware Connection
+
+Connect the buzzer to your Pico:
+- Buzzer positive to GPIO pin (e.g., GP15)
+- Buzzer negative to GND
+
+### 4. VS Code Project Structure
+
+```
+pico_buzzer_ws/
+├── mcu_ws/            # Micro-ROS workspace
+├── build/             # Build directory
+├── src/
+│   ├── CMakeLists.txt
+│   ├── main.cpp       # Main application code
+│   └── ...            # Other source files
+└── ...
+```
+
+### 5. Buzzer Control Code Example
+
+Here's a simple C++ implementation to control the buzzer with Micro-ROS:
+
+```cpp
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <std_msgs/msg/bool.h>
+
+#include "pico/stdlib.h"
+
+#define BUZZER_PIN 15
+
+rcl_publisher_t publisher;
+rcl_subscription_t subscriber;
+std_msgs__msg__Bool msg;
+
+void buzzer_callback(const void *msgin) {
+    const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
+    gpio_put(BUZZER_PIN, msg->data);
+}
+
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
+    (void)last_call_time;
+    if (timer != NULL) {
+        rcl_publish(&publisher, &msg, NULL);
+    }
+}
+
+int main() {
+    stdio_init_all();
+    gpio_init(BUZZER_PIN);
+    gpio_set_dir(BUZZER_PIN, GPIO_OUT);
+
+    rcl_allocator_t allocator = rcl_get_default_allocator();
+    rclc_support_t support;
+    rclc_executor_t executor;
+    rcl_node_t node;
+    rcl_timer_t timer;
+
+    // Initialize Micro-ROS
+    rclc_support_init(&support, 0, NULL, &allocator);
+    rclc_node_init_default(&node, "pico_buzzer_node", "", &support);
+
+    // Create subscriber for buzzer control
+    rclc_subscription_init_default(
+        &subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+        "buzzer_control");
+
+    // Create publisher for status (optional)
+    rclc_publisher_init_default(
+        &publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+        "buzzer_status");
+
+    // Create timer (optional)
+    rclc_timer_init_default(
+        &timer,
+        &support,
+        RCL_MS_TO_NS(1000),
+        timer_callback);
+
+    // Create executor
+    rclc_executor_init(&executor, &support.context, 2, &allocator);
+    rclc_executor_add_subscription(&executor, &subscriber, &msg, &buzzer_callback, ON_NEW_DATA);
+    rclc_executor_add_timer(&executor, &timer);
+
+    msg.data = false;
+
+    while(1) {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        sleep_ms(10);
+    }
+
+    // Cleanup (unlikely to reach here)
+    rcl_publisher_fini(&publisher, &node);
+    rcl_subscription_fini(&subscriber, &node);
+    rcl_node_fini(&node);
+
+    return 0;
+}
+```
+
+### 6. CMakeLists.txt Example
+
+```cmake
+cmake_minimum_required(VERSION 3.13)
+
+include($ENV{COLCON_PREFIX_PATH}/share/micro_ros_sdk/cmake/micro_ros_sdk.cmake)
+
+project(pico_buzzer)
+
+add_executable(pico_buzzer src/main.cpp)
+
+target_include_directories(pico_buzzer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    $ENV{PICO_SDK_PATH}/src/common/pico_stdlib/include
+)
+
+target_link_libraries(pico_buzzer
+    pico_stdlib
+    micro_ros_sdk
+)
+
+micro_ros_setup()
+```
+
+### 7. Building and Flashing
+
+1. Configure the project in VS Code using CMake Tools
+2. Build the project
+3. Flash the UF2 file to your Pico
+
+### 8. Testing with ROS 2
+
+On your host machine:
+
+```bash
+# Source your ROS 2 environment
+source /opt/ros/humble/setup.bash
+
+# To turn the buzzer on
+ros2 topic pub /buzzer_control std_msgs/msg/Bool "{data: true}"
+
+# To turn it off
+ros2 topic pub /buzzer_control std_msgs/msg/Bool "{data: false}"
+```
+
+## Advanced Features
+
+1. **PWM Control**: For variable tone frequency
+2. **Patterns**: Implement different beeping patterns
+3. **ROS Services**: Add service calls for specific buzzer sequences
+
+## Troubleshooting
+
+- If the buzzer doesn't sound, check your wiring and try reversing the polarity
+- For active buzzers, you may need a transistor to drive it properly
+- Ensure Micro-ROS agent is running on your host machine
+
+This setup provides a foundation for integrating buzzer control with ROS 2 on Raspberry Pi Pico using Micro-ROS and VS Code.

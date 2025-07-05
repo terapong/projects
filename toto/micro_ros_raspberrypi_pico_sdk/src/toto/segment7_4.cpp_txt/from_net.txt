@@ -1,0 +1,222 @@
+# Micro-ROS on Raspberry Pi Pico with 7+4 Segment Display
+
+Here's a guide to setting up Micro-ROS on a Raspberry Pi Pico and controlling a 7+4 segment display using C++.
+
+## Prerequisites
+
+- Raspberry Pi Pico
+- 7+4 segment display (like a 4-digit 7-segment display)
+- Basic electronics components (resistors, breadboard, jumper wires)
+- Micro-ROS setup for Raspberry Pi Pico
+- ROS 2 installed on your host machine
+
+## Step 1: Set Up Micro-ROS on Raspberry Pi Pico
+
+1. Follow the Micro-ROS instructions for Raspberry Pi Pico:
+   ```bash
+   git clone -b $ROS_DISTRO https://github.com/micro-ROS/micro_ros_raspberrypi_pico_sdk.git
+   ```
+
+2. Build the Micro-ROS firmware for Pico
+
+## Step 2: Hardware Connections
+
+Connect your 7+4 segment display to the Pico. Here's a typical connection for a common cathode display:
+
+```
+Digit 1: GPIO 0
+Digit 2: GPIO 1
+Digit 3: GPIO 2
+Digit 4: GPIO 3
+
+Segments:
+A: GPIO 4
+B: GPIO 5
+C: GPIO 6
+D: GPIO 7
+E: GPIO 8
+F: GPIO 9
+G: GPIO 10
+DP: GPIO 11 (decimal point)
+```
+
+Add appropriate current-limiting resistors (typically 220Ω) for each segment.
+
+## Step 3: C++ Code for Micro-ROS and Display Control
+
+```cpp
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "rcl/rcl.h"
+#include "rclc/rclc.h"
+#include "std_msgs/msg/int32.h"
+
+// Define GPIO pins for the display
+const uint segment_pins[] = {4, 5, 6, 7, 8, 9, 10, 11}; // A, B, C, D, E, F, G, DP
+const uint digit_pins[] = {0, 1, 2, 3}; // Digit 1-4
+
+// Segment patterns for numbers 0-9
+const uint8_t digit_patterns[10] = {
+    0b00111111, // 0 77₈  = 63₁₀  = 3F₁₆
+    0b00000110, // 1 6₈   = 6₁₀   = 6₁₆
+    0b01011011, // 2 133₈ = 91₁₀  = 5B₁₆
+    0b01001111, // 3 117₈ = 79₁₀  = 4F₁₆
+    0b01100110, // 4 146₈ = 102₁₀ = 66₁₆
+    0b01101101, // 5 155₈ = 109₁₀ = 6D₁₆
+    0b01111101, // 6 175₈ = 125₁₀ = 7D₁₆
+    0b00000111, // 7 7₈   = 7₁₀   = 7₁₆
+    0b01111111, // 8 177₈ = 127₁₀ = 7F₁₆
+    0b01101111  // 9 157₈ = 111₁₀ = 6F₁₆
+};
+
+rcl_subscription_t subscriber;
+std_msgs__msg__Int32 msg;
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+
+// Variables for display multiplexing
+int display_value = 0;
+int current_digit = 0;
+int digits[4] = {0};
+
+void update_display() {
+    // Turn off all digits
+    for (int i = 0; i < 4; i++) {
+        gpio_put(digit_pins[i], 0);
+    }
+    
+    // Set segments for current digit
+    uint8_t pattern = digit_patterns[digits[current_digit]];
+    for (int i = 0; i < 8; i++) {
+        gpio_put(segment_pins[i], (pattern >> i) & 0x01); 
+        // gpio_put(segment_pins[i], (pattern >> i) & 0x01); 
+        // HIGH LOW >> cout << cint 0x01 = 0000 0001 = 1 เป็นเลข ทัาน 16 0xFF = 1111 1111 = 377
+        //(pattern >> i) & 0x01) มันคือ Used in expressions to perform a bitwise AND on integers.
+    }
+    
+    // Turn on current digit
+    gpio_put(digit_pins[current_digit], 1);
+    
+    // Move to next digit
+    current_digit = (current_digit + 1) % 4;
+}
+
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
+    (void)last_call_time;
+    (void)timer;
+    update_display();
+}
+
+void subscription_callback(const void *msgin) {
+    const std_msgs__msg__Int32 *msg = (const std_msgs__msg__Int32 *)msgin;
+    display_value = msg->data;
+    
+    // Split the value into individual digits
+    int value = display_value;
+    for (int i = 3; i >= 0; i--) {
+        digits[i] = value % 10;
+        value /= 10;
+    }
+}
+
+int main() {
+    stdio_init_all();
+    
+    // Initialize GPIO pins
+    for (int i = 0; i < 8; i++) {
+        gpio_init(segment_pins[i]);
+        gpio_set_dir(segment_pins[i], GPIO_OUT);
+    }
+    for (int i = 0; i < 4; i++) {
+        gpio_init(digit_pins[i]);
+        gpio_set_dir(digit_pins[i], GPIO_OUT);
+    }
+    
+    // Initialize Micro-ROS
+    allocator = rcl_get_default_allocator();
+    rclc_support_init(&support, 0, NULL, &allocator);
+    rclc_node_init_default(&node, "pico_display_node", "", &support);
+    
+    // Create subscriber
+    rclc_subscription_init_default(
+        &subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+        "display_value");
+    
+    // Create timer for display multiplexing
+    rcl_timer_t timer;
+    rclc_timer_init_default(
+        &timer,
+        &support,
+        RCL_MS_TO_NS(5), // Update every 5ms
+        timer_callback);
+    
+    // Create executor
+    rclc_executor_init(&executor, &support.context, 2, &allocator);
+    rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
+    rclc_executor_add_timer(&executor, &timer);
+    
+    // Main loop
+    while (true) {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+    }
+    
+    return 0;
+}
+```
+
+## Step 4: ROS 2 Node to Control the Display
+
+Create a ROS 2 node on your host machine to send values to the Pico:
+
+```python
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int32
+
+class DisplayController(Node):
+    def __init__(self):
+        super().__init__('display_controller')
+        self.publisher = self.create_publisher(Int32, 'display_value', 10)
+        self.timer = self.create_timer(1.0, self.publish_value)
+        self.counter = 0
+    
+    def publish_value(self):
+        msg = Int32()
+        msg.data = self.counter
+        self.publisher.publish(msg)
+        self.get_logger().info(f'Publishing: {msg.data}')
+        self.counter += 1
+        if self.counter > 9999:
+            self.counter = 0
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = DisplayController()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+```
+
+## Building and Running
+
+1. Build the Micro-ROS firmware and flash it to your Pico
+2. Connect the Pico to your ROS 2 network via serial or UDP
+3. Run the ROS 2 node on your host machine
+4. The display should show incrementing numbers from 0 to 9999
+
+## Additional Notes
+
+- For better display brightness, adjust the multiplexing timing in the timer callback
+- You can extend this to show negative numbers or add decimal points
+- Consider adding error handling for out-of-range values
+- For more complex applications, you might want to create a custom message type
+
+Would you like me to elaborate on any specific part of this setup?

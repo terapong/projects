@@ -1,0 +1,146 @@
+# Using Micro-ROS with Raspberry Pi Pico and a Potentiometer
+
+This guide will show you how to read a potentiometer value with a Raspberry Pi Pico and publish it via Micro-ROS.
+
+## Prerequisites
+
+- Raspberry Pi Pico (with soldered headers recommended)
+- Potentiometer (10kΩ recommended)
+- Micro-ROS development environment set up
+- ROS 2 installed on your host machine
+- USB cable for Pico
+- Breadboard and jumper wires
+
+## Hardware Connections
+
+Connect the potentiometer to your Pico:
+
+1. Connect one outer pin of the potentiometer to Pico's 3.3V (pin 36)
+2. Connect the other outer pin to Pico's GND (pin 38)
+3. Connect the middle pin (wiper) to Pico's ADC0 (GP26, pin 31)
+
+## Micro-ROS Setup
+
+### 1. Create a new Micro-ROS project
+
+Follow the Micro-ROS setup instructions for Raspberry Pi Pico from the [Micro-ROS documentation](https://micro.ros.org/docs/tutorials/core/first_application_rtos/freertos/).
+
+### 2. Modify the code to read the potentiometer
+
+Here's a basic example that reads the potentiometer and publishes its value:
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include "pico/stdlib.h"
+#include "hardware/adc.h"
+
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+
+#include <std_msgs/msg/int32.h>
+
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Aborting.\n",__LINE__,(int)temp_rc); return 1;}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Continuing.\n",__LINE__,(int)temp_rc);}}
+
+rcl_publisher_t publisher;
+std_msgs__msg__Int32 msg;
+
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time)
+{
+    (void) last_call_time;
+    if (timer != NULL) {
+        // Read ADC value (0-4095 for 12-bit ADC)
+        uint16_t adc_val = adc_read();
+        msg.data = (int32_t)adc_val;
+        
+        RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
+    }
+}
+
+int main()
+{
+    stdio_init_all();
+    
+    // Initialize ADC
+    adc_init();
+    adc_gpio_init(26); // GPIO26 is ADC0
+    adc_select_input(0); // Select ADC input 0 (GPIO26)
+    
+    // Micro-ROS setup
+    rcl_allocator_t allocator = rcl_get_default_allocator();
+    rclc_support_t support;
+    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+    
+    RCCHECK(rcl_init_options_init(&init_options, allocator));
+    RCCHECK(rclc_support_init(&support, 0, NULL, &init_options, &allocator));
+    
+    rcl_node_t node;
+    RCCHECK(rclc_node_init_default(&node, "pico_potentiometer_node", "", &support));
+    
+    RCCHECK(rclc_publisher_init_default(
+        &publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+        "potentiometer_value"));
+    
+    rcl_timer_t timer;
+    const unsigned int timer_timeout = 100; // ms
+    RCCHECK(rclc_timer_init_default(
+        &timer,
+        &support,
+        RCL_MS_TO_NS(timer_timeout),
+        timer_callback));
+    
+    rclc_executor_t executor;
+    RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+    RCCHECK(rclc_executor_add_timer(&executor, &timer));
+    
+    msg.data = 0;
+    
+    while(1) {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+    }
+    
+    RCCHECK(rcl_publisher_fini(&publisher, &node));
+    RCCHECK(rcl_node_fini(&node));
+    
+    return 0;
+}
+```
+
+## Building and Flashing
+
+1. Build your Micro-ROS project for the Pico
+2. Flash the `.uf2` file to your Pico (hold BOOTSEL while connecting USB)
+3. Connect the Pico to your ROS 2 machine via USB
+
+## Testing the Setup
+
+On your ROS 2 host machine:
+
+1. Start the Micro-ROS agent:
+```bash
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
+```
+
+2. In another terminal, listen to the potentiometer values:
+```bash
+ros2 topic echo /potentiometer_value
+```
+
+3. Rotate the potentiometer and you should see the values change between 0-4095 (for 12-bit ADC).
+
+## Next Steps
+
+- Calibrate the ADC readings to your specific potentiometer range
+- Convert the raw ADC values to meaningful units (e.g., voltage, angle)
+- Add QoS configurations for better performance
+- Implement a service to calibrate or configure the potentiometer readings
+
+Remember that the Pico's ADC is not highly accurate by default. For better results, you might want to:
+- Add a small capacitor (0.1µF) between the ADC pin and ground
+- Implement software filtering (e.g., moving average)
+- Consider using the Pico's ADC temperature sensor for compensation if needed

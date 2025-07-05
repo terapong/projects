@@ -1,0 +1,210 @@
+# Micro-ROS with Raspberry Pi Pico and Stepper Motor in C++ using VS Code
+
+This guide will help you set up a Micro-ROS environment on a Raspberry Pi Pico to control a stepper motor using C++ in VS Code.
+
+## Prerequisites
+
+- Raspberry Pi Pico or Pico W
+- Stepper motor (e.g., 28BYJ-48 with ULN2003 driver)
+- Micro-USB cable
+- VS Code installed
+- Basic understanding of ROS 2
+
+## Setup Steps
+
+### 1. Install Required Tools
+
+```bash
+# Install ARM toolchain
+sudo apt install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential
+
+# Install VS Code extensions:
+- C/C++
+- CMake Tools
+- Cortex-Debug
+```
+
+### 2. Set Up Micro-ROS for Pico
+
+1. Clone the Micro-ROS Pico SDK:
+```bash
+git clone https://github.com/micro-ROS/micro_ros_raspberrypi_pico_sdk.git
+cd micro_ros_raspberrypi_pico_sdk
+git submodule update --init
+```
+
+2. Set up the environment in VS Code:
+- Open the folder in VS Code
+- Select the ARM GCC toolchain when prompted by CMake Tools
+
+### 3. Stepper Motor Connection
+
+Typical connections for ULN2003 driver:
+- IN1 → Pico GPIO 0
+- IN2 → Pico GPIO 1
+- IN3 → Pico GPIO 2
+- IN4 → Pico GPIO 3
+- Power supply appropriate for your motor
+
+### 4. Create Micro-ROS Node for Stepper Control
+
+Create a new file `main.cpp`:
+
+```cpp
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "rcl/rcl.h"
+#include "rclc/rclc.h"
+#include "std_msgs/msg/int32.h"
+
+// Stepper motor pins
+const uint IN1 = 0;
+const uint IN2 = 1;
+const uint IN3 = 2;
+const uint IN4 = 3;
+
+// Stepper motor sequence
+const uint8_t step_sequence[8] = {
+    0b0001,
+    0b0011,
+    0b0010,
+    0b0110,
+    0b0100,
+    0b1100,
+    0b1000,
+    0b1001
+};
+
+rcl_publisher_t publisher;
+std_msgs__msg__Int32 pub_msg;
+rcl_subscription_t subscriber;
+std_msgs__msg__Int32 sub_msg;
+
+void stepper_step(uint steps, int direction) {
+    static uint step_index = 0;
+    
+    for(uint i = 0; i < steps; i++) {
+        if(direction == 1) {
+            step_index = (step_index + 1) % 8;
+        } else {
+            step_index = (step_index - 1) % 8;
+        }
+        
+        gpio_put(IN1, step_sequence[step_index] & 0b0001);
+        gpio_put(IN2, step_sequence[step_index] & 0b0010);
+        gpio_put(IN3, step_sequence[step_index] & 0b0100);
+        gpio_put(IN4, step_sequence[step_index] & 0b1000);
+        
+        sleep_ms(2); // Adjust for speed
+    }
+}
+
+void subscription_callback(const void *msgin) {
+    const std_msgs__msg__Int32 *msg = (const std_msgs__msg__Int32 *)msgin;
+    
+    int steps = msg->data;
+    int direction = steps > 0 ? 1 : -1;
+    steps = abs(steps);
+    
+    stepper_step(steps, direction);
+    
+    // Publish feedback
+    pub_msg.data = steps * direction;
+    rcl_publish(&publisher, &pub_msg, NULL);
+}
+
+int main() {
+    stdio_init_all();
+    
+    // Initialize GPIO
+    gpio_init(IN1);
+    gpio_init(IN2);
+    gpio_init(IN3);
+    gpio_init(IN4);
+    gpio_set_dir(IN1, GPIO_OUT);
+    gpio_set_dir(IN2, GPIO_OUT);
+    gpio_set_dir(IN3, GPIO_OUT);
+    gpio_set_dir(IN4, GPIO_OUT);
+    
+    // Micro-ROS setup
+    rcl_allocator_t allocator = rcl_get_default_allocator();
+    rclc_support_t support;
+    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+    
+    rcl_init_options_init(&init_options, allocator);
+    rclc_support_init(&support, 0, NULL, &init_options, &allocator);
+    
+    rcl_node_t node;
+    rclc_node_init_default(&node, "pico_stepper_node", "", &support);
+    
+    // Create publisher
+    rclc_publisher_init_default(
+        &publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+        "stepper_feedback");
+    
+    // Create subscriber
+    rclc_subscription_init_default(
+        &subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+        "stepper_control");
+    
+    // Create executor
+    rclc_executor_t executor;
+    rclc_executor_init(&executor, &support.context, 1, &allocator);
+    rclc_executor_add_subscription(&executor, &subscriber, &sub_msg, &subscription_callback, ON_NEW_DATA);
+    
+    pub_msg.data = 0;
+    
+    while(true) {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+    }
+    
+    // Cleanup (unreachable in this example)
+    rcl_publisher_fini(&publisher, &node);
+    rcl_subscription_fini(&subscriber, &node);
+    rcl_node_fini(&node);
+    
+    return 0;
+}
+```
+
+### 5. Build and Flash
+
+1. Configure CMake to include your source file
+2. Build the project in VS Code using CMake Tools
+3. Flash the UF2 file to your Pico (hold BOOTSEL while connecting)
+
+### 6. Set Up Micro-ROS Agent
+
+On your host machine (Linux):
+
+```bash
+# Install Micro-ROS agent
+sudo apt install ros-humble-micro-ros-agent
+
+# Run the agent (connect Pico via USB)
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
+```
+
+### 7. Control the Stepper from ROS 2
+
+```bash
+# In a new terminal, send commands to the stepper
+ros2 topic pub /stepper_control std_msgs/msg/Int32 "{data: 512}"  # 512 steps forward
+ros2 topic pub /stepper_control std_msgs/msg/Int32 "{data: -256}" # 256 steps backward
+
+# View feedback
+ros2 topic echo /stepper_feedback
+```
+
+## Tips
+
+1. Adjust the sleep time in `stepper_step()` to control motor speed
+2. For more precise control, consider implementing acceleration/deceleration
+3. Add error handling for the motor (e.g., stall detection)
+4. Consider adding services for more complex commands
+
+This setup provides a basic framework that you can expand with more sophisticated stepper control algorithms and ROS 2 interfaces.

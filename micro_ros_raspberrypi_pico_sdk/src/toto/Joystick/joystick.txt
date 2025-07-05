@@ -1,0 +1,225 @@
+# Micro-ROS with Raspberry Pi Pico and Joystick in C++ using VS Code
+
+This guide will help you set up Micro-ROS on a Raspberry Pi Pico to read from a joystick module using C++ in VS Code.
+
+## Prerequisites
+
+- Raspberry Pi Pico
+- Analog joystick module (typically with X/Y axes and a button)
+- VS Code installed
+- Basic C++ knowledge
+- Micro-ROS setup
+
+## Setup Steps
+
+### 1. Install Required Tools
+
+1. Install VS Code with the following extensions:
+   - C/C++
+   - CMake Tools
+   - Pico-Go (optional but helpful)
+
+2. Install the Pico SDK following the official documentation:
+   ```
+   git clone https://github.com/raspberrypi/pico-sdk.git
+   ```
+
+3. Set up Micro-ROS for Pico:
+   ```
+   git clone https://github.com/micro-ROS/micro_ros_raspberrypi_pico_sdk.git
+   ```
+
+### 2. Hardware Connections
+
+Connect your joystick to the Pico:
+- Joystick VCC to Pico 3.3V
+- Joystick GND to Pico GND
+- Joystick VRx to Pico ADC0 (GP26)
+- Joystick VRy to Pico ADC1 (GP27)
+- Joystick SW to Pico GPIO (e.g., GP16)
+
+### 3. VS Code Project Setup
+
+1. Create a new folder for your project
+2. Add the following files:
+
+#### CMakeLists.txt
+```cmake
+cmake_minimum_required(VERSION 3.12)
+
+include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+
+project(micro_ros_joystick C CXX)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
+
+pico_sdk_init()
+
+add_executable(micro_ros_joystick
+    src/main.cpp
+)
+
+target_include_directories(micro_ros_joystick PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/include
+)
+
+target_link_libraries(micro_ros_joystick
+    pico_stdlib
+    hardware_adc
+    hardware_gpio
+)
+
+pico_add_extra_outputs(micro_ros_joystick)
+```
+
+#### src/main.cpp
+```cpp
+#include "pico/stdlib.h"
+#include "hardware/adc.h"
+#include "hardware/gpio.h"
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <sensor_msgs/msg/joy.h>
+
+#define JOYSTICK_X_ADC 0      // GP26
+#define JOYSTICK_Y_ADC 1      // GP27
+#define JOYSTICK_BUTTON_GPIO 16
+
+rcl_publisher_t publisher;
+sensor_msgs__msg__Joy joy_msg;
+
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
+    (void)last_call_time;
+    if (timer != NULL) {
+        // Read joystick values
+        adc_select_input(JOYSTICK_X_ADC);
+        float x = adc_read() / 4095.0f * 2.0f - 1.0f; // Convert to -1.0 to 1.0
+        
+        adc_select_input(JOYSTICK_Y_ADC);
+        float y = adc_read() / 4095.0f * 2.0f - 1.0f; // Convert to -1.0 to 1.0
+        
+        bool button = !gpio_get(JOYSTICK_BUTTON_GPIO); // Assuming active low
+        
+        // Prepare message
+        joy_msg.axes[0] = x;
+        joy_msg.axes[1] = y;
+        joy_msg.buttons[0] = button ? 1 : 0;
+        
+        // Publish message
+        rcl_ret_t ret = rcl_publish(&publisher, &joy_msg, NULL);
+    }
+}
+
+int main() {
+    stdio_init_all();
+    
+    // Initialize ADC for joystick
+    adc_init();
+    adc_gpio_init(26); // X axis
+    adc_gpio_init(27); // Y axis
+    
+    // Initialize button GPIO
+    gpio_init(JOYSTICK_BUTTON_GPIO);
+    gpio_set_dir(JOYSTICK_BUTTON_GPIO, GPIO_IN);
+    gpio_pull_up(JOYSTICK_BUTTON_GPIO);
+    
+    // Micro-ROS setup
+    rcl_allocator_t allocator = rcl_get_default_allocator();
+    rclc_support_t support;
+    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+    
+    rcl_ret_t rc = rcl_init_options_init(&init_options, allocator);
+    rc = rclc_support_init(&support, 0, NULL, &allocator);
+    
+    rcl_node_t node;
+    rc = rclc_node_init_default(&node, "pico_joystick_node", "", &support);
+    
+    rc = rclc_publisher_init_default(
+        &publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Joy),
+        "joy");
+    
+    rcl_timer_t timer;
+    rc = rclc_timer_init_default(
+        &timer,
+        &support,
+        RCL_MS_TO_NS(100), // 100ms
+        timer_callback);
+    
+    rclc_executor_t executor;
+    rc = rclc_executor_init(&executor, &support.context, 1, &allocator);
+    rc = rclc_executor_add_timer(&executor, &timer);
+    
+    // Initialize joy message
+    joy_msg.axes.data = (float*)malloc(2 * sizeof(float));
+    joy_msg.axes.size = 2;
+    joy_msg.buttons.data = (int32_t*)malloc(1 * sizeof(int32_t));
+    joy_msg.buttons.size = 1;
+    
+    while(true) {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+    }
+    
+    // Cleanup (though we'll never get here)
+    free(joy_msg.axes.data);
+    free(joy_msg.buttons.data);
+    return 0;
+}
+```
+
+### 4. Build and Flash
+
+1. Configure CMake in VS Code:
+   - Set the PICO_SDK_PATH environment variable to point to your Pico SDK
+   - Select the appropriate kit (GCC for ARM)
+
+2. Build the project using the CMake Tools extension
+
+3. Flash the UF2 file to your Pico:
+   - Hold the BOOTSEL button while plugging in the Pico
+   - Drag and drop the generated UF2 file to the RPI-RP2 drive
+
+### 5. Micro-ROS Agent Setup
+
+On your host machine (Linux recommended):
+
+```bash
+# Install Micro-ROS agent
+sudo apt update && sudo apt install -y ros-<distro>-micro-ros-agent
+
+# Run the agent (replace /dev/ttyACM0 with your actual port)
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
+```
+
+### 6. Test the Joystick
+
+On another terminal:
+```bash
+# List topics
+ros2 topic list
+
+# Echo the joystick topic
+ros2 topic echo /joy
+```
+
+## Troubleshooting
+
+1. If you don't see the /joy topic:
+   - Check the serial connection between Pico and host
+   - Verify the Micro-ROS agent is running
+   - Check for errors in the Pico's serial output (use a serial monitor)
+
+2. If joystick values seem incorrect:
+   - Verify your wiring
+   - Check if you need to invert any axes
+   - Add calibration if needed
+
+3. For build errors:
+   - Verify all paths are correct
+   - Ensure all dependencies are installed
+
+This setup provides a basic foundation for reading joystick values and publishing them via Micro-ROS. You can extend it with additional features like deadzone handling, calibration, or more buttons as needed.

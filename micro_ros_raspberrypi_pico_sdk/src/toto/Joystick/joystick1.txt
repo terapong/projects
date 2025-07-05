@@ -1,0 +1,223 @@
+# Micro-ROS with Raspberry Pi Pico and Joystick
+
+This guide covers setting up Micro-ROS on a Raspberry Pi Pico to read joystick data and communicate it via ROS 2, with options for both C++ and Python implementations.
+
+## Hardware Setup
+
+### Components Needed:
+- Raspberry Pi Pico (or Pico W)
+- Analog joystick module (typically with X/Y axes and a button)
+- Breadboard and jumper wires
+- Micro-USB cable
+
+### Wiring:
+```
+Joystick    | Pico
+-------------------
+VCC         | 3.3V (Pin 36)
+GND         | GND (Pin 38)
+VRx (X-axis)| GP26 (ADC0)
+VRy (Y-axis)| GP27 (ADC1)
+SW (Button) | GP16 (with pull-up)
+```
+
+## Micro-ROS C++ Implementation
+
+### 1. Set up Micro-ROS for Pico
+
+Follow the Micro-ROS Pico setup instructions from the [official documentation](https://micro.ros.org/docs/tutorials/core/first_application_rtos/freertos/).
+
+### 2. Create a joystick publisher node
+
+```cpp
+#include <micro_ros_platformio.h>
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <sensor_msgs/msg/joy.h>
+
+#include <hardware/adc.h>
+
+#define LED_PIN 25
+#define BUTTON_PIN 16
+
+rcl_publisher_t publisher;
+sensor_msgs__msg__Joy joy_msg;
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+rcl_timer_t timer;
+
+// ADC pins for joystick
+const int x_axis_pin = 26;
+const int y_axis_pin = 27;
+
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
+    (void)last_call_time;
+    if (timer != NULL) {
+        // Read joystick values
+        joy_msg.axes[0] = (float)adc_read() / (1 << 12) * 2.0 - 1.0; // X-axis (-1 to 1)
+        adc_select_input(1);
+        joy_msg.axes[1] = (float)adc_read() / (1 << 12) * 2.0 - 1.0; // Y-axis (-1 to 1)
+        
+        // Read button (inverted since typically pulled up)
+        joy_msg.buttons[0] = !gpio_get(BUTTON_PIN);
+        
+        // Publish message
+        rcl_publish(&publisher, &joy_msg, NULL);
+    }
+}
+
+void setup() {
+    // Initialize Micro-ROS
+    set_microros_platformio_transports();
+    
+    // Initialize hardware
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+    
+    gpio_init(BUTTON_PIN);
+    gpio_set_dir(BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(BUTTON_PIN);
+    
+    // Initialize ADC for joystick
+    adc_init();
+    adc_gpio_init(x_axis_pin);
+    adc_gpio_init(y_axis_pin);
+    adc_select_input(0);
+    
+    // Initialize ROS2
+    allocator = rcl_get_default_allocator();
+    rclc_support_init(&support, 0, NULL, &allocator);
+    rclc_node_init_default(&node, "pico_joystick_node", "", &support);
+    
+    // Create publisher
+    rclc_publisher_init_default(
+        &publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Joy),
+        "joy");
+    
+    // Initialize joy message
+    joy_msg.axes.size = 2;
+    joy_msg.axes.capacity = 2;
+    joy_msg.axes.data = (float*)malloc(2 * sizeof(float));
+    
+    joy_msg.buttons.size = 1;
+    joy_msg.buttons.capacity = 1;
+    joy_msg.buttons.data = (int32_t*)malloc(1 * sizeof(int32_t));
+    
+    // Create timer
+    rclc_timer_init_default(
+        &timer,
+        &support,
+        RCL_MS_TO_NS(100),
+        timer_callback);
+    
+    // Create executor
+    rclc_executor_init(&executor, &support.context, 1, &allocator);
+    rclc_executor_add_timer(&executor, &timer);
+}
+
+void loop() {
+    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+}
+```
+
+## Micro-ROS Python Implementation (Agent)
+
+To receive the joystick data on your computer, you'll need a Micro-ROS agent and a Python subscriber:
+
+```python
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Joy
+
+class JoystickSubscriber(Node):
+    def __init__(self):
+        super().__init__('joystick_subscriber')
+        self.subscription = self.create_subscription(
+            Joy,
+            'joy',
+            self.listener_callback,
+            10)
+        self.subscription  # prevent unused variable warning
+
+    def listener_callback(self, msg):
+        self.get_logger().info(
+            f'Joystick - X: {msg.axes[0]:.2f}, Y: {msg.axes[1]:.2f}, Button: {msg.buttons[0]}')
+
+def main(args=None):
+    rclpy.init(args=args)
+    joystick_subscriber = JoystickSubscriber()
+    rclpy.spin(joystick_subscriber)
+    joystick_subscriber.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+```
+
+## Running the System
+
+1. Flash the C++ code to your Pico
+2. Start the Micro-ROS agent on your computer:
+   ```
+   ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
+   ```
+   (Replace `/dev/ttyACM0` with your Pico's serial port)
+3. Run the Python subscriber:
+   ```
+   python3 joystick_subscriber.py
+   ```
+
+## Alternative: Pure Python with Pico (without Micro-ROS)
+
+If you want to skip Micro-ROS and just communicate via serial:
+
+### Pico Python Code (using MicroPython):
+
+```python
+from machine import Pin, ADC
+import time
+import ustruct
+
+# Setup pins
+x_axis = ADC(26)
+y_axis = ADC(27)
+button = Pin(16, Pin.IN, Pin.PULL_UP)
+led = Pin(25, Pin.OUT)
+
+while True:
+    # Read joystick
+    x_val = x_axis.read_u16()
+    y_val = y_axis.read_u16()
+    btn_val = button.value()
+    
+    # Send as packed binary data (4 bytes per float, 1 byte for button)
+    data = ustruct.pack('ffB', x_val, y_val, btn_val)
+    print(data)
+    
+    # Blink LED to show activity
+    led.toggle()
+    time.sleep(0.1)
+```
+
+### Python PC Code to Read Serial Data:
+
+```python
+import serial
+import struct
+
+ser = serial.Serial('/dev/ttyACM0', 115200)  # Adjust port as needed
+
+while True:
+    data = ser.readline().strip()
+    if len(data) == 9:  # 4+4+1 bytes
+        x, y, btn = struct.unpack('ffB', data)
+        print(f"X: {x}, Y: {y}, Button: {btn}")
+```
+
+This provides a simpler alternative if you don't need full ROS 2 integration.

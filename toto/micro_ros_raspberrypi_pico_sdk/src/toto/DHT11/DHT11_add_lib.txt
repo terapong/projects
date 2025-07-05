@@ -1,0 +1,198 @@
+# Integrating DHT11 Sensor with micro-ROS in VSCode (C++ Project)
+
+Here's a step-by-step guide to add a DHT11 temperature and humidity sensor to your micro-ROS project in VSCode:
+
+## Prerequisites
+- Existing micro-ROS project set up in VSCode
+- ESP32 or other supported micro-ROS hardware
+- DHT11 sensor
+- Basic understanding of micro-ROS and C++
+
+## Step 1: Hardware Connections
+Connect the DHT11 to your microcontroller:
+- VCC to 3.3V or 5V (check your DHT11 specs)
+- Data to a GPIO pin (e.g., GPIO4)
+- GND to ground
+
+## Step 2: Add DHT Library to Your Project
+
+1. Download the DHT sensor library (Adafruit's version works well):
+   ```bash
+   git clone https://github.com/adafruit/DHT-sensor-library.git
+   ```
+2. Copy the library to your project's `lib` folder or add it to your include path.
+
+## Step 3: Modify Your Project Files
+
+### 1. Update `colcon.meta` (if using micro-ROS build system)
+Add any necessary build flags for the DHT library.
+
+### 2. Modify `main.cpp` or your main application file:
+
+```cpp
+#include <micro_ros_arduino.h>
+#include <stdio.h>
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <sensor_msgs/msg/temperature.h>
+#include <sensor_msgs/msg/relative_humidity.h>
+#include <DHT.h>
+
+// Define DHT sensor
+#define DHTPIN 4     // GPIO pin connected to DHT11
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ROS2 entities
+rcl_publisher_t temperature_publisher;
+rcl_publisher_t humidity_publisher;
+sensor_msgs__msg__Temperature temperature_msg;
+sensor_msgs__msg__RelativeHumidity humidity_msg;
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+
+// Timer for periodic reading
+rcl_timer_t timer;
+
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
+
+void error_loop(){
+  while(1){
+    delay(100);
+  }
+}
+
+void timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
+  (void) last_call_time;
+  if (timer != NULL) {
+    // Read temperature and humidity
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    
+    if (isnan(h) || isnan(t)) {
+      printf("Failed to read from DHT sensor!\n");
+      return;
+    }
+    
+    // Populate messages
+    temperature_msg.temperature = t;
+    temperature_msg.variance = 0.0;
+    
+    humidity_msg.relative_humidity = h;
+    humidity_msg.variance = 0.0;
+    
+    // Publish
+    RCSOFTCHECK(rcl_publish(&temperature_publisher, &temperature_msg, NULL));
+    RCSOFTCHECK(rcl_publish(&humidity_publisher, &humidity_msg, NULL));
+    
+    printf("Published: Temp=%.2f°C, Humidity=%.2f%%\n", t, h);
+  }
+}
+
+void setup() {
+  // Initialize micro-ROS
+  set_microros_transports();
+  delay(2000);
+  
+  // Initialize DHT sensor
+  dht.begin();
+  
+  allocator = rcl_get_default_allocator();
+  
+  // Create init_options
+  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+  
+  // Create node
+  RCCHECK(rclc_node_init_default(&node, "micro_ros_dht11_node", "", &support));
+  
+  // Create publishers
+  RCCHECK(rclc_publisher_init_default(
+    &temperature_publisher,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Temperature),
+    "temperature"));
+    
+  RCCHECK(rclc_publisher_init_default(
+    &humidity_publisher,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, RelativeHumidity),
+    "humidity"));
+  
+  // Create timer
+  const unsigned int timer_timeout = 2000; // 2 seconds
+  RCCHECK(rclc_timer_init_default(
+    &timer,
+    &support,
+    RCL_MS_TO_NS(timer_timeout),
+    timer_callback));
+  
+  // Create executor
+  RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_add_timer(&executor, &timer));
+  
+  // Initialize messages
+  temperature_msg = sensor_msgs__msg__Temperature__create();
+  humidity_msg = sensor_msgs__msg__RelativeHumidity__create();
+}
+
+void loop() {
+  delay(100);
+  RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
+}
+```
+
+## Step 4: Update CMakeLists.txt
+
+Add the DHT library to your build:
+
+```cmake
+# Add these lines to your CMakeLists.txt
+include_directories(
+  lib/DHT-sensor-library
+)
+
+# Add DHT library sources
+add_library(dht_lib STATIC
+  lib/DHT-sensor-library/DHT.cpp
+  lib/DHT-sensor-library/DHT.h
+)
+
+# Link to your main executable
+target_link_libraries(your_executable
+  dht_lib
+  ${micro_ros_libraries}
+)
+```
+
+## Step 5: Build and Flash
+
+1. Build your project:
+   ```bash
+   colcon build
+   ```
+2. Flash to your device using the appropriate method for your hardware.
+
+## Step 6: Verify in ROS2
+
+After running the micro-ROS agent, you can verify the data:
+
+```bash
+# In one terminal
+ros2 topic echo /temperature
+# In another terminal
+ros2 topic echo /humidity
+```
+
+## Troubleshooting Tips
+
+1. If you get compilation errors about the DHT library, check that the include paths are correct.
+2. For reading errors, verify your wiring and GPIO pin number.
+3. Make sure your micro-ROS agent is properly configured and running.
+4. Check the serial monitor for debug output from your microcontroller.
+
+This implementation publishes temperature and humidity as separate topics. You could also create a custom message type if you prefer to publish them together.

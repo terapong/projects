@@ -1,0 +1,170 @@
+# Micro-ROS with Raspberry Pi Pico in VS Code for Servo Control (C++)
+
+This guide will help you set up a Micro-ROS environment on Raspberry Pi Pico using VS Code to control a servo motor with C++.
+
+## Prerequisites
+
+- Raspberry Pi Pico
+- Micro-USB cable
+- Servo motor (e.g., SG90)
+- VS Code installed
+- Basic understanding of ROS 2
+
+## Setup Steps
+
+### 1. Install Required Tools
+
+```bash
+# Install ARM toolchain
+sudo apt install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential
+
+# Install VS Code extensions:
+# - C/C++
+# - CMake Tools
+# - RT-Thread Studio (optional for Pico support)
+```
+
+### 2. Set Up Micro-ROS for Pico
+
+1. Clone the Micro-ROS Pico SDK:
+```bash
+git clone https://github.com/micro-ros/micro_ros_raspberrypi_pico_sdk.git
+```
+
+2. Initialize the submodules:
+```bash
+cd micro_ros_raspberrypi_pico_sdk
+git submodule update --init
+```
+
+### 3. Create a VS Code Project
+
+1. Open VS Code and create a new folder for your project
+2. Copy the Micro-ROS Pico SDK files into your project folder
+3. Create a `CMakeLists.txt` and modify it for servo control
+
+### 4. Servo Control Example Code
+
+Create a `main.cpp` file:
+
+```cpp
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "hardware/pwm.h"
+
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <std_msgs/msg/int32.h>
+
+#define SERVO_PIN 16
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Aborting.\n",__LINE__,(int)temp_rc); return 1;}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Continuing.\n",__LINE__,(int)temp_rc);}}
+
+rcl_subscription_t subscriber;
+std_msgs__msg__Int32 msg;
+
+void pwm_init() {
+    gpio_set_function(SERVO_PIN, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(SERVO_PIN);
+    
+    pwm_config config = pwm_get_default_config();
+    pwm_config_set_clkdiv(&config, 64.f);
+    pwm_config_set_wrap(&config, 39062.f); // 50Hz frequency
+    
+    pwm_init(slice_num, &config, true);
+}
+
+void set_servo_angle(int angle) {
+    // Convert angle (0-180) to pulse width (1000-2000µs)
+    float pulse_width = 1000 + (angle / 180.0) * 1000;
+    float wrap = 39062.f; // Corresponds to 20ms period
+    float level = (pulse_width / 20000.f) * wrap;
+    
+    pwm_set_gpio_level(SERVO_PIN, (uint16_t)level);
+}
+
+void subscription_callback(const void *msgin) {
+    const std_msgs__msg__Int32 *msg = (const std_msgs__msg__Int32 *)msgin;
+    printf("Received angle: %d\n", msg->data);
+    set_servo_angle(msg->data);
+}
+
+int main() {
+    stdio_init_all();
+    pwm_init();
+    
+    rcl_allocator_t allocator = rcl_get_default_allocator();
+    rclc_support_t support;
+    rcl_node_t node;
+    
+    // Initialize Micro-ROS
+    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+    RCCHECK(rclc_node_init_default(&node, "pico_servo_node", "", &support));
+    
+    // Create subscriber
+    RCCHECK(rclc_subscription_init_default(
+        &subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+        "servo_angle"));
+    
+    rclc_executor_t executor;
+    RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+    RCCHECK(rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA));
+    
+    printf("Micro-ROS Pico Servo Controller Ready!\n");
+    
+    while(1) {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        sleep_ms(10);
+    }
+    
+    RCCHECK(rcl_subscription_fini(&subscriber, &node));
+    RCCHECK(rcl_node_fini(&node));
+    
+    return 0;
+}
+```
+
+### 5. Build and Flash
+
+1. Configure CMake for your project
+2. Build the project in VS Code
+3. Flash the UF2 file to your Pico (hold BOOTSEL while connecting)
+
+### 6. ROS 2 Setup on Host Machine
+
+On your ROS 2 machine (Ubuntu with ROS 2 installed):
+
+```bash
+# Install micro-ROS agent
+sudo apt install ros-$ROS_DISTRO-micro-ros-agent
+
+# Run the agent
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0
+```
+
+### 7. Control the Servo
+
+Publish angle commands from your host machine:
+
+```bash
+ros2 topic pub /servo_angle std_msgs/msg/Int32 "{data: 90}"
+```
+
+## Troubleshooting
+
+1. If the Pico isn't detected:
+   - Check USB connection
+   - Verify correct port in agent command (/dev/ttyACM0 or /dev/ttyACM1)
+
+2. If servo doesn't move:
+   - Check power supply (servos often need external power)
+   - Verify PWM pin connections
+
+3. For Micro-ROS communication issues:
+   - Ensure baud rates match
+   - Check agent is running before Pico connects
+
+This setup gives you a foundation for more complex ROS 2 controlled robotics projects with Raspberry Pi Pico!
